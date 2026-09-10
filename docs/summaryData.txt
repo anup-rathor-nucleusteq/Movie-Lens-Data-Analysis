@@ -1,0 +1,34 @@
+**Movies File
+movie_id : int
+title : string 
+genres : string
+Missing Values :
+ranges:
+
+
+** Links file
+movieId: int
+imdbId: string
+tmdbId: string
+Missing Values :
+ranges:
+
+
+** Tags file
+userId:int
+movieId:int
+tag: string
+timestamp: string
+Missing Values :
+ranges:
+
+** Ratings file
+userId:int
+movieId:int
+rating:double/float
+timestamp: string
+Missing Values :
+ranges: Most of ratings lies between 1.0 to 5.0
+
+
+
