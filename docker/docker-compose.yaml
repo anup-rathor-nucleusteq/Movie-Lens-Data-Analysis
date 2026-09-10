@@ -1,0 +1,73 @@
+x-airflow-common: &airflow-common
+  build: .
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-metadb:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    JAVA_HOME: /usr/lib/jvm/java-17-openjdk-amd64
+    PYTHONPATH: /opt/airflow/src/python:/opt/airflow/src/pyspark
+    PG_HOST: host.docker.internal
+    PG_PORT: '5432'
+    PG_DB: movielens
+    PG_USER: postgres
+    PG_PASSWORD: ${PG_PASSWORD}
+  volumes:
+    - ../airflow_dags:/opt/airflow/dags
+    - ../src:/opt/airflow/src
+    - ../data:/opt/airflow/data
+    - ../jars:/opt/airflow/jars
+    - ../sql:/opt/airflow/sql
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+  user: "50000:0"
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  depends_on:
+    airflow-metadb:
+      condition: service_healthy
+
+services:
+
+  airflow-metadb:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-metadb-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username airflow --password airflow \
+          --firstname Admin --lastname User \
+          --role Admin --email admin@example.com || true
+    restart: on-failure
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    restart: always
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    restart: always
+
+volumes:
+  airflow-metadb-data:
