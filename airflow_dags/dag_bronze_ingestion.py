@@ -1,32 +1,22 @@
 """
 Bronze ingestion DAG.
 
-This file contains NO business logic. It imports the functions from
-src/python and src/pyspark and wires them into tasks. All the actual
-work lives in code you already wrote and already tested.
-
-That separation matters: the same functions run from the command line
-and from Airflow. Fix a bug once, both benefit.
 """
 
 from datetime import datetime, timedelta
-
+from datasets import BRONZE_READY
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from db import count_rows
+from spark_utils import get_spark
+import ingest_bronze as job
+import audit
 
 
 def _run_with_spark(loader_name):
     """
     Start Spark, run one loader function, stop Spark.
-
-    Imports happen INSIDE the function, not at the top of the file.
-    Reason: Airflow's scheduler parses every DAG file every 30 seconds.
-    If PySpark were imported at module level, the scheduler would load
-    the whole Spark library on every parse - slow and pointless, since
-    only the task process actually needs it.
     """
-    from spark_utils import get_spark
-    import ingest_bronze as job
 
     spark = get_spark(f"airflow_{loader_name}")
     try:
@@ -46,13 +36,11 @@ def _run_with_spark(loader_name):
 
 def create_audit_table():
     """Make sure audit.ingestion_log exists before anything else runs."""
-    import audit
     audit.create_log_table()
 
 
 def verify_counts():
     """Print final row counts. Fails the task if anything is empty."""
-    from db import count_rows
 
     expected = {
         "links": 87585,
@@ -122,6 +110,7 @@ with DAG(
     verify = PythonOperator(
         task_id="verify_row_counts",
         python_callable=verify_counts,
+        outlets=[BRONZE_READY],
     )
 
     # setup runs first, then the three small loads in PARALLEL,

@@ -4,6 +4,7 @@ docker/.env
 docker/logs/
 docker/plugins/
 docker/Dockerfile
+airflow_dags/datasets.py
 .myenv/
 env/
 jars/
