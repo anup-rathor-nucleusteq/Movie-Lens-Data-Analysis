@@ -15,7 +15,7 @@ def get_spark(app_name):
         .master("local[*]")
         .config("spark.jars", jar)
         .config("spark.driver.extraClassPath", jar)
-        .config("spark.driver.memory", "4g")
+        .config("spark.driver.memory", "6g")
         .config("spark.sql.session.timeZone", "UTC")
         .getOrCreate()
     )
@@ -48,17 +48,17 @@ def add_load_timestamp(df):
 
 
 def write_to_postgres(df, table, mode):
-    """
-    Write a DataFrame to a Postgres table.
+    # cache() tells Spark: after you compute this once, keep a copy
+    # in memory. Without it, .count() below and .write() further down
+    df = df.cache()
 
-    mode is "overwrite" (drop and recreate) or "append" (add rows).
-    coalesce(4) reduces the no of partitions to 4
-    """
     row_count = df.count()
+
     df.coalesce(4).write.jdbc(
-        url=JDBC_URL,
-        table=table,
-        mode=mode,
-        properties=JDBC_PROPS,
+        url=JDBC_URL, table=table, mode=mode, properties=JDBC_PROPS
     )
+
+    # release the memory now that both the count and the write are done
+    df.unpersist()
+
     return row_count
