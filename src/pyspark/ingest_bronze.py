@@ -1,10 +1,5 @@
 """
 Load raw CSVs into the bronze schema.
-
-links, movies, tags -> one file each, always overwrite.
-ratings            -> five files, loaded one at a time.
-                      part1 overwrites, parts 2-5 append.
-                      Already-loaded parts are skipped.
 """
 
 import sys
@@ -13,50 +8,36 @@ from pathlib import Path
 # Let this file import from src/python
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
-from pyspark.sql.types import (
-    StructType, StructField, IntegerType, LongType, DoubleType, StringType,
-)
-
 import audit
 from config import RAW_DIR
 from db import count_rows
-from spark_utils import get_spark, read_csv, add_load_timestamp, write_to_postgres
+from spark_utils import get_spark, add_load_timestamp, write_to_postgres
 
 
-# schemas
-# imdbId is StringType on purpose. The values look like "0114709".
-# Reading it as a number would turn that into 114709 and lose the zeros.
+# expected columns only. Bronze uses Spark schema inference.
+LINKS_SCHEMA = ["movie_id", "imdb_id", "tmdb_id"]
+MOVIES_SCHEMA = ["movie_id", "title", "genres"]
+TAGS_SCHEMA = ["user_id", "movie_id", "tag", "timestamp"]
+RATINGS_SCHEMA = ["user_id", "movie_id", "rating", "timestamp"]
 
-LINKS_SCHEMA = StructType([
-    StructField("movieId", IntegerType()),
-    StructField("imdbId", StringType()),
-    StructField("tmdbId", StringType()),
-])
 
-MOVIES_SCHEMA = StructType([
-    StructField("movieId", IntegerType()),
-    StructField("title", StringType()),
-    StructField("genres", StringType()),
-])
-
-TAGS_SCHEMA = StructType([
-    StructField("userId", IntegerType()),
-    StructField("movieId", IntegerType()),
-    StructField("tag", StringType()),
-    StructField("timestamp", LongType()),
-])
-
-RATINGS_SCHEMA = StructType([
-    StructField("userId", IntegerType()),
-    StructField("movieId", IntegerType()),
-    StructField("rating", DoubleType()),
-    StructField("timestamp", LongType()),
-])
+def read_bronze_csv(spark, path):
+    """Read a raw CSV with Spark schema inference enabled."""
+    return (
+        spark.read
+        .option("header", True)
+        .option("inferSchema", True)
+        .option("quote", '"')
+        .option("escape", '"')
+        .option("multiLine", True)
+        .option("mode", "PERMISSIVE")
+        .csv(str(path))
+    )
 
 
 # single file
 
-def load_single_file(spark, source_name, file_name, schema):
+def load_single_file(spark, source_name, file_name, expected_columns):
     """
     Load one CSV into bronze.<source_name>, overwriting what's there.
 
@@ -72,12 +53,11 @@ def load_single_file(spark, source_name, file_name, schema):
         audit.log_load(source_name, file_name, 0, None, "MISSING_FILE")
         return
 
-    df = read_csv(spark, path, schema)
+    df = read_bronze_csv(spark, path)
 
-    # Schema check: do the columns match what we expected?
-    expected = [field.name for field in schema.fields]
-    if df.columns != expected:
-        print(f"SCHEMA MISMATCH: expected {expected}, got {df.columns}")
+    # Structural check: do the inferred columns match what we expected?
+    if df.columns != expected_columns:
+        print(f"SCHEMA MISMATCH: expected {expected_columns}, got {df.columns}")
         audit.log_load(source_name, file_name, 0, None, "SCHEMA_FAIL")
         return
 
@@ -126,10 +106,9 @@ def load_ratings(spark):
         else:
             mode = "append"
 
-        df = read_csv(spark, path, RATINGS_SCHEMA)
+        df = read_bronze_csv(spark, path)
 
-        expected = [field.name for field in RATINGS_SCHEMA.fields]
-        if df.columns != expected:
+        if df.columns != RATINGS_SCHEMA:
             print(f"SCHEMA MISMATCH in {path.name}")
             audit.log_load("ratings", path.name, 0, mode, "SCHEMA_FAIL")
             continue
