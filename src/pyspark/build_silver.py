@@ -10,6 +10,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 import quality as Q
 import transforms as T
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType, StructField, IntegerType, DoubleType, StringType, TimestampType,
+)
 from config import JDBC_URL, JDBC_PROPS
 from db import count_rows, execute
 from spark_utils import get_spark, write_to_postgres
@@ -52,6 +56,55 @@ def read_large(spark, table, num_partitions=8):
     )
 
 
+# Explicit schemas for the silver output tables.
+# Bronze is inferred; Silver owns the final data types.
+LINKS_SCHEMA = StructType([
+    StructField("MovieId", IntegerType(), True),
+    StructField("ImdbId", StringType(), True),
+    StructField("TmdbId", StringType(), True),
+    StructField("CreateDtTm", TimestampType(), True),
+    StructField("UpdateDtTm", TimestampType(), True),
+])
+
+MOVIES_SCHEMA = StructType([
+    StructField("MovieId", IntegerType(), True),
+    StructField("Title", StringType(), True),
+    StructField("CleanTitle", StringType(), True),
+    StructField("ReleaseYear", IntegerType(), True),
+    StructField("Genres", StringType(), True),
+    StructField("CreateDtTm", TimestampType(), True),
+    StructField("UpdateDtTm", TimestampType(), True),
+])
+
+RATINGS_SCHEMA = StructType([
+    StructField("UserId", IntegerType(), True),
+    StructField("MovieId", IntegerType(), True),
+    StructField("Rating", DoubleType(), True),
+    StructField("RatingTstmp", TimestampType(), True),
+    StructField("CreateDtTm", TimestampType(), True),
+    StructField("UpdateDtTm", TimestampType(), True),
+])
+
+TAGS_SCHEMA = StructType([
+    StructField("UserId", IntegerType(), True),
+    StructField("MovieId", IntegerType(), True),
+    StructField("TagText", StringType(), True),
+    StructField("TagTstmp", TimestampType(), True),
+    StructField("CreateDtTm", TimestampType(), True),
+    StructField("UpdateDtTm", TimestampType(), True),
+])
+
+
+def apply_schema(df, schema):
+    """Cast a Silver DataFrame to its explicit StructType schema."""
+    return df.select(
+        *[
+            F.col(field.name).cast(field.dataType).alias(field.name)
+            for field in schema.fields
+        ]
+    )
+
+
 # silver.links
 
 
@@ -74,6 +127,7 @@ def build_links(spark):
         "MovieId", "ImdbId", "TmdbId", "CreateDtTm", "UpdateDtTm",
     ])
 
+    good = apply_schema(good, LINKS_SCHEMA)
     write_to_postgres(good, "silver.links", mode="overwrite")
     Q.write_quarantine(bad, "links")
 
@@ -106,6 +160,7 @@ def build_movies(spark):
         "CreateDtTm", "UpdateDtTm",
     ])
 
+    good = apply_schema(good, MOVIES_SCHEMA)
     write_to_postgres(good, "silver.movies", mode="overwrite")
     Q.write_quarantine(bad, "movies")
 
@@ -176,6 +231,7 @@ def build_ratings(spark, batch_size=20000):
         ])
 
         mode = "overwrite" if batch_num == 1 else "append"
+        good = apply_schema(good, RATINGS_SCHEMA)
         write_to_postgres(good, "silver.ratings", mode=mode)
         Q.write_quarantine(bad, "ratings", mode)
 
@@ -220,6 +276,7 @@ def build_tags(spark, batch_size=50000):
         ])
 
         mode = "overwrite" if batch_num == 1 else "append"
+        good = apply_schema(good, TAGS_SCHEMA)
         write_to_postgres(good, "silver.tags", mode=mode)
         Q.write_quarantine(bad, "tags", mode)
 
