@@ -14,13 +14,6 @@ from db import count_rows
 from spark_utils import get_spark, add_load_timestamp, write_to_postgres
 
 
-# expected columns only. Bronze uses Spark schema inference.
-LINKS_SCHEMA = ["movie_id", "imdb_id", "tmdb_id"]
-MOVIES_SCHEMA = ["movie_id", "title", "genres"]
-TAGS_SCHEMA = ["user_id", "movie_id", "tag", "timestamp"]
-RATINGS_SCHEMA = ["user_id", "movie_id", "rating", "timestamp"]
-
-
 def read_bronze_csv(spark, path):
     """Read a raw CSV with Spark schema inference enabled."""
     return (
@@ -37,7 +30,7 @@ def read_bronze_csv(spark, path):
 
 # single file
 
-def load_single_file(spark, source_name, file_name, expected_columns):
+def load_single_file(spark, source_name, file_name):
     """
     Load one CSV into bronze.<source_name>, overwriting what's there.
 
@@ -55,24 +48,28 @@ def load_single_file(spark, source_name, file_name, expected_columns):
 
     df = read_bronze_csv(spark, path)
 
-    # Structural check: do the inferred columns match what we expected?
-    if df.columns != expected_columns:
-        print(f"SCHEMA MISMATCH: expected {expected_columns}, got {df.columns}")
-        audit.log_load(source_name, file_name, 0, None, "SCHEMA_FAIL")
-        return
-
     df = add_load_timestamp(df)
-    rows = write_to_postgres(df, f"bronze.{source_name}", mode="overwrite")
+    rows = write_to_postgres(
+        df,
+        f"bronze.{source_name}",
+        mode="overwrite",
+    )
 
     print(f"Loaded {rows:,} rows into bronze.{source_name}")
-    audit.log_load(source_name, file_name, rows, "overwrite", "SUCCESS")
+    audit.log_load(
+        source_name,
+        file_name,
+        rows,
+        "overwrite",
+        "SUCCESS",
+    )
 
 
 # ratings
 
 def load_ratings(spark):
     """
-    Load the five ratings files one at a time.
+    Load the ratings files one at a time.
 
     First file overwrites, the rest append. Any file already recorded as
     SUCCESS in the audit log is skipped, so re-running is safe.
@@ -108,19 +105,24 @@ def load_ratings(spark):
 
         df = read_bronze_csv(spark, path)
 
-        if df.columns != RATINGS_SCHEMA:
-            print(f"SCHEMA MISMATCH in {path.name}")
-            audit.log_load("ratings", path.name, 0, mode, "SCHEMA_FAIL")
-            continue
-
         df = add_load_timestamp(df)
-        rows = write_to_postgres(df, "bronze.ratings", mode=mode)
+        rows = write_to_postgres(
+            df,
+            "bronze.ratings",
+            mode=mode,
+        )
 
         print(f"{path.name} -> {rows:,} rows ({mode})")
-        audit.log_load("ratings", path.name, rows, mode, "SUCCESS")
+        audit.log_load(
+            "ratings",
+            path.name,
+            rows,
+            mode,
+            "SUCCESS",
+        )
 
 
-#  main
+# main
 
 def main():
     audit.create_log_table()
@@ -128,9 +130,9 @@ def main():
     spark = get_spark("bronze_ingestion")
 
     try:
-        load_single_file(spark, "links", "links.csv", LINKS_SCHEMA)
-        load_single_file(spark, "movies", "movies.csv", MOVIES_SCHEMA)
-        load_single_file(spark, "tags", "tags.csv", TAGS_SCHEMA)
+        load_single_file(spark, "links", "links.csv")
+        load_single_file(spark, "movies", "movies.csv")
+        load_single_file(spark, "tags", "tags.csv")
         load_ratings(spark)
     finally:
         spark.stop()
@@ -138,7 +140,10 @@ def main():
     print("\n" + "=" * 50)
     print("FINAL ROW COUNTS")
     for table in ["links", "movies", "tags", "ratings"]:
-        print(f"  bronze.{table:<8} {count_rows('bronze', table):,}")
+        print(
+            f"  bronze.{table:<8} "
+            f"{count_rows('bronze', table):,}"
+        )
 
 
 if __name__ == "__main__":

@@ -1,58 +1,64 @@
 """
 Bronze ingestion DAG.
-
-This file contains NO business logic. It imports the functions from
-src/python and src/pyspark and wires them into tasks. All the actual
-work lives in code you already wrote and already tested.
-
-That separation matters: the same functions run from the command line
-and from Airflow. Fix a bug once, both benefit.
 """
 
 from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from spark_utils import get_spark
+import ingest_bronze as job
+import audit
+from db import count_rows
 
 
 def _run_with_spark(loader_name):
     """
     Start Spark, run one loader function, stop Spark.
-
-    Imports happen INSIDE the function, not at the top of the file.
-    Reason: Airflow's scheduler parses every DAG file every 30 seconds.
-    If PySpark were imported at module level, the scheduler would load
-    the whole Spark library on every parse - slow and pointless, since
-    only the task process actually needs it.
     """
-    from spark_utils import get_spark
-    import ingest_bronze as job
 
     spark = get_spark(f"airflow_{loader_name}")
+
     try:
         if loader_name == "links":
-            job.load_single_file(spark, "links", "links.csv", job.LINKS_SCHEMA)
+            job.load_single_file(
+                spark,
+                "links",
+                "links.csv",
+            )
+
         elif loader_name == "movies":
-            job.load_single_file(spark, "movies", "movies.csv", job.MOVIES_SCHEMA)
+            job.load_single_file(
+                spark,
+                "movies",
+                "movies.csv",
+            )
+
         elif loader_name == "tags":
-            job.load_single_file(spark, "tags", "tags.csv", job.TAGS_SCHEMA)
+            job.load_single_file(
+                spark,
+                "tags",
+                "tags.csv",
+            )
+
         elif loader_name == "ratings":
             job.load_ratings(spark)
+
         else:
             raise ValueError(f"Unknown loader: {loader_name}")
+
     finally:
         spark.stop()
 
 
 def create_audit_table():
     """Make sure audit.ingestion_log exists before anything else runs."""
-    import audit
+
     audit.create_log_table()
 
 
 def verify_counts():
     """Print final row counts. Fails the task if anything is empty."""
-    from db import count_rows
 
     expected = {
         "links": 87585,
@@ -62,14 +68,25 @@ def verify_counts():
     }
 
     problems = []
+
     for table, want in expected.items():
         got = count_rows("bronze", table)
-        print(f"bronze.{table:<8} {got:>12,}  (expected {want:,})")
+
+        print(
+            f"bronze.{table:<8} "
+            f"{got:>12,}  "
+            f"(expected {want:,})"
+        )
+
         if got != want:
-            problems.append(f"{table}: got {got:,}, expected {want:,}")
+            problems.append(
+                f"{table}: got {got:,}, expected {want:,}"
+            )
 
     if problems:
-        raise ValueError("Row count mismatch -> " + "; ".join(problems))
+        raise ValueError(
+            "Row count mismatch -> " + "; ".join(problems)
+        )
 
     print("All row counts match the official dataset.")
 
@@ -79,6 +96,7 @@ default_args = {
     "retries": 2,
     "retry_delay": timedelta(minutes=1),
 }
+
 
 with DAG(
     dag_id="bronze_ingestion",
