@@ -13,8 +13,8 @@ JAR_PATH = PROJECT_ROOT / "jars" / "postgresql-42.7.3.jar"
 PG_HOST = os.environ.get("PG_HOST", "localhost")
 PG_PORT = os.environ.get("PG_PORT", "5432")
 PG_DB = os.environ.get("PG_DB", "movielens")
-PG_USER = os.environ.get("PG_USER", "postgres")
-PG_PASSWORD = os.environ.get("PG_PASSWORD", "Asr@1699#")
+PG_USER = os.environ.get("PG_USER")
+PG_PASSWORD = os.environ.get("PG_PASSWORD")
 
 # The connection string Java uses.
 JDBC_URL = f"jdbc:postgresql://{PG_HOST}:{PG_PORT}/{PG_DB}?reWriteBatchedInserts=true"
