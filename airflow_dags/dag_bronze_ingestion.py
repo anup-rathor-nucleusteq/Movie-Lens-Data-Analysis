@@ -17,19 +17,38 @@ def _run_with_spark(loader_name):
     """
     Start Spark, run one loader function, stop Spark.
     """
+    """
 
     spark = get_spark(f"airflow_{loader_name}")
+
     try:
         if loader_name == "links":
-            job.load_single_file(spark, "links", "links.csv", job.LINKS_SCHEMA)
+            job.load_single_file(
+                spark,
+                "links",
+                "links.csv",
+            )
+
         elif loader_name == "movies":
-            job.load_single_file(spark, "movies", "movies.csv", job.MOVIES_SCHEMA)
+            job.load_single_file(
+                spark,
+                "movies",
+                "movies.csv",
+            )
+
         elif loader_name == "tags":
-            job.load_single_file(spark, "tags", "tags.csv", job.TAGS_SCHEMA)
+            job.load_single_file(
+                spark,
+                "tags",
+                "tags.csv",
+            )
+
         elif loader_name == "ratings":
             job.load_ratings(spark)
+
         else:
             raise ValueError(f"Unknown loader: {loader_name}")
+
     finally:
         spark.stop()
 
@@ -50,14 +69,25 @@ def verify_counts():
     }
 
     problems = []
+
     for table, want in expected.items():
         got = count_rows("bronze", table)
-        print(f"bronze.{table:<8} {got:>12,}  (expected {want:,})")
+
+        print(
+            f"bronze.{table:<8} "
+            f"{got:>12,}  "
+            f"(expected {want:,})"
+        )
+
         if got != want:
-            problems.append(f"{table}: got {got:,}, expected {want:,}")
+            problems.append(
+                f"{table}: got {got:,}, expected {want:,}"
+            )
 
     if problems:
-        raise ValueError("Row count mismatch -> " + "; ".join(problems))
+        raise ValueError(
+            "Row count mismatch -> " + "; ".join(problems)
+        )
 
     print("All row counts match the official dataset.")
 
@@ -67,6 +97,7 @@ default_args = {
     "retries": 2,
     "retry_delay": timedelta(minutes=1),
 }
+
 
 with DAG(
     dag_id="bronze_ingestion",
