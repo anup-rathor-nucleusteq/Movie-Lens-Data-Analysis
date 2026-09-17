@@ -1,6 +1,5 @@
 """
 Bronze ingestion DAG.
-
 """
 
 from datetime import datetime, timedelta
@@ -17,8 +16,7 @@ def _run_with_spark(loader_name):
     """
     Start Spark, run one loader function, stop Spark.
     """
-    """
-
+    
     spark = get_spark(f"airflow_{loader_name}")
 
     try:
