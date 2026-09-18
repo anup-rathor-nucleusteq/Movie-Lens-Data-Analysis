@@ -51,23 +51,16 @@ def read_silver(spark, table):
 # gold.movie_insight
 
 def build_movie_insight(spark):
-    """
-    One row per movie: rating stats plus tag stats.
-
-    Rating stats come from user_ratings_master.
-    Tag stats come from silver.tags, because master only has tags
-    that sit alongside a rating - a user can tag without rating.
-    """
     print("\n--- gold.movie_insight ---")
 
-    master = read_master(spark).select(
-        "MovieId", "Title", "ReleaseYear", "Rating"
+    # Start from ALL movies, not just rated ones — this is the fix.
+    all_movies = read_silver(spark, "movie_metadata").select(
+        "MovieId", "Title", "ReleaseYear"
     )
 
-    # --- rating aggregates ---
+    master = read_master(spark).select("MovieId", "Rating")
+
     rating_stats = master.groupBy("MovieId").agg(
-        F.first("Title").alias("MovieTitle"),
-        F.first("ReleaseYear").alias("ReleaseYear"),
         F.round(F.avg("Rating"), 4).alias("AvgRating"),
         F.max("Rating").alias("HighestRating"),
         F.min("Rating").alias("LowestRating"),
@@ -87,22 +80,26 @@ def build_movie_insight(spark):
 
     # --- combine ---
     df = (
-        rating_stats
+        all_movies
+        .join(rating_stats, on="MovieId", how="left")
         .join(tag_stats, on="MovieId", how="left")
         .join(popular_tag, on="MovieId", how="left")
     )
 
-    # Movies with no tags get null counts. Zero is the honest value.
-    df = df.fillna({"TotalTaggers": 0, "TotalTags": 0, "DistinctTags": 0})
+    df = df.fillna({
+        "TotalRatings": 0, "TotalTaggers": 0,
+        "TotalTags": 0, "DistinctTags": 0,
+    })
 
     df = G.add_gold_audit(df)
     df = df.select(
-        "MovieId", "ReleaseYear", "MovieTitle", "AvgRating",
-        "HighestRating", "LowestRating", "TotalRatings",
+        "MovieId", "ReleaseYear",
+        F.col("Title").alias("MovieTitle"),
+        "AvgRating", "HighestRating", "LowestRating", "TotalRatings",
         "TotalTaggers", "TotalTags", "DistinctTags", "PopularTag",
-        "LoadTs", "UpdateTs",
-    )
-
+        "LoadTs", "UpdateTs"
+        )
+    
     write_to_postgres(df, "gold.movie_insight", mode="overwrite")
     print("  done")
 
