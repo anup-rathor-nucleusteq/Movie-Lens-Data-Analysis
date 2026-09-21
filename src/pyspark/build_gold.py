@@ -95,7 +95,8 @@ def build_movie_insight(spark):
     df = df.select(
         "MovieId", "ReleaseYear",
         F.col("Title").alias("MovieTitle"),
-        "AvgRating", "HighestRating", "LowestRating", "TotalRatings",
+        "AvgRating", "HighestRating", "LowestRating", "TotalRa" \
+        "tings",
         "TotalTaggers", "TotalTags", "DistinctTags", "PopularTag",
         "LoadTs", "UpdateTs"
         )
