@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 import audit
 from config import RAW_DIR
-from db import count_rows
+from db import count_rows , execute
 from spark_utils import get_spark, add_load_timestamp, write_to_postgres
 
 
@@ -32,13 +32,10 @@ def read_bronze_csv(spark, path):
 
 def load_single_file(spark, source_name, file_name):
     """
-    Load one CSV into bronze.<source_name>, overwriting what's there.
-
-    Used for links, movies and tags. These are small single files, so
-    overwriting is fast and always safe.
+    Load one CSV into bronze.<source_name>.
+    Simulates real-world append by truncating first for local hardware limits.
     """
     print(f"\n--- {source_name} ---")
-
     path = RAW_DIR / file_name
 
     if not path.exists():
@@ -47,36 +44,27 @@ def load_single_file(spark, source_name, file_name):
         return
 
     df = read_bronze_csv(spark, path)
-
     df = add_load_timestamp(df)
+
+    # ---FIX: Delete the data before appending ---
+    # We truncate the table and clear its audit history so we get a fresh start
+    execute(f"TRUNCATE TABLE bronze.{source_name};")
+    execute(f"DELETE FROM audit.ingestion_log WHERE source_name = '{source_name}';")
+    # Now we can safely use append
     rows = write_to_postgres(
         df,
         f"bronze.{source_name}",
-        mode="overwrite",
+        mode="append", 
     )
 
     print(f"Loaded {rows:,} rows into bronze.{source_name}")
-    audit.log_load(
-        source_name,
-        file_name,
-        rows,
-        "overwrite",
-        "SUCCESS",
-    )
+    audit.log_load(source_name, file_name, rows, "append", "SUCCESS")
 
 
 # ratings
 
 def load_ratings(spark):
-    """
-    Load the ratings files one at a time.
-
-    First file overwrites, the rest append. Any file already recorded as
-    SUCCESS in the audit log is skipped, so re-running is safe.
-    """
     print("\n--- ratings ---")
-
-    # Find all ratings_part*.csv files, sorted so part1 comes first
     files = sorted(RAW_DIR.glob("ratings_part*.csv"))
 
     if not files:
@@ -84,28 +72,27 @@ def load_ratings(spark):
         audit.log_load("ratings", None, 0, None, "MISSING_FILE")
         return
 
-    print(f"Found {len(files)} files: {[f.name for f in files]}")
+    # ---FIX: Reset the table before the batch starts ---
+    # We wipe the entire 32 million rows and the audit log ONCE at the start.
+    print("Truncating bronze.ratings to prepare for fresh append...")
+    execute("TRUNCATE TABLE bronze.ratings;")
+    execute("DELETE FROM audit.ingestion_log WHERE source_name = 'ratings';")
 
+    # Because we cleared the log, already_loaded will be empty, 
+    # but we still fetch it just in case your audit logic requires it.
     already_loaded = audit.get_loaded_files("ratings")
-    if already_loaded:
-        print(f"Already loaded: {sorted(already_loaded)}")
 
     for index, path in enumerate(files):
-
         if path.name in already_loaded:
             print(f"SKIP {path.name}")
             continue
 
-        # Overwrite only if this is the first file AND nothing is loaded yet.
-        # If some parts are already in the table, we must append, not wipe.
-        if index == 0 and not already_loaded:
-            mode = "overwrite"
-        else:
-            mode = "append"
-
         df = read_bronze_csv(spark, path)
-
         df = add_load_timestamp(df)
+
+        # Now EVERY file uses append, simulating a real-world streaming/batch process
+        mode = "append"
+        
         rows = write_to_postgres(
             df,
             "bronze.ratings",
@@ -113,13 +100,7 @@ def load_ratings(spark):
         )
 
         print(f"{path.name} -> {rows:,} rows ({mode})")
-        audit.log_load(
-            "ratings",
-            path.name,
-            rows,
-            mode,
-            "SUCCESS",
-        )
+        audit.log_load("ratings", path.name, rows, mode, "SUCCESS")
 
 
 # main
