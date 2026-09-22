@@ -36,14 +36,6 @@ def read_small(spark, table):
 def read_large(spark, table, num_partitions=8):
     """
     Read a large table using 8 parallel connections.
-
-    Spark splits the work by ranges of userId. With 8 partitions,
-    connection 1 fetches roughly userId 1-25000, connection 2 fetches
-    25001-50000, and so on.
-
-    This is the fix for the OutOfMemoryError. Without it, Spark pulls
-    all 32 million rows through ONE connection into ONE partition,
-    and 4 GB cannot hold that.
     """
     return spark.read.jdbc(
         url=JDBC_URL,
@@ -57,7 +49,6 @@ def read_large(spark, table, num_partitions=8):
 
 
 # Explicit schemas for the silver output tables.
-# Bronze is inferred; Silver owns the final data types.
 LINKS_SCHEMA = StructType([
     StructField("MovieId", IntegerType(), True),
     StructField("ImdbId", StringType(), True),
@@ -104,9 +95,42 @@ def apply_schema(df, schema):
         ]
     )
 
+def upsert_via_staging(spark, df, table_name, join_keys):
+    """
+    Upserts data into Postgres using a Staging Table pattern.
+    This safely bypasses the 'cannot drop table because views depend on it' error.
+    """
+    staging_table = f"{table_name}_staging"
+    
+    # Write incoming data to a temporary staging table
+    write_to_postgres(df, staging_table, mode="overwrite")
+    
+    # Ensure target table exists (creates it without data if missing)
+    empty_df = spark.createDataFrame(spark.sparkContext.emptyRDD(), df.schema)
+    write_to_postgres(empty_df, table_name, mode="append")
+    
+    # Delete existing records that match the new keys
+    condition = " AND ".join([f'target."{k}" = staging."{k}"' for k in join_keys])
+    delete_sql = f"""
+        DELETE FROM {table_name} target
+        USING {staging_table} staging
+        WHERE {condition};
+    """
+    execute(delete_sql)
+    
+    # Insert the new records
+    cols = ", ".join([f'"{field.name}"' for field in df.schema.fields])
+    insert_sql = f"""
+        INSERT INTO {table_name} ({cols})
+        SELECT {cols} FROM {staging_table};
+    """
+    execute(insert_sql)
+    
+    # Clean up
+    execute(f"DROP TABLE {staging_table};")
+
 
 # silver.links
-
 
 def build_links(spark):
     print("\n--- silver.links ---")
@@ -128,20 +152,19 @@ def build_links(spark):
     ])
 
     good = apply_schema(good, LINKS_SCHEMA)
-    write_to_postgres(good, "silver.links", mode="overwrite")
-    Q.write_quarantine(bad, "links")
-
+    
+    # UPSERT instead of OVERWRITE
+    upsert_via_staging(spark, good, "silver.links", ["MovieId"])
+    Q.write_quarantine(bad, "links", mode="append")
 
 
 # silver.movies
-
 
 def build_movies(spark):
     print("\n--- silver.movies ---")
 
     df = read_small(spark, "movies")
 
-    # Extract the year while the column is still called "title"
     df = T.extract_release_year(df, "title")
     df = T.clean_title(df, "title")
 
@@ -161,12 +184,13 @@ def build_movies(spark):
     ])
 
     good = apply_schema(good, MOVIES_SCHEMA)
-    write_to_postgres(good, "silver.movies", mode="overwrite")
-    Q.write_quarantine(bad, "movies")
+    
+    # UPSERT instead of OVERWRITE
+    upsert_via_staging(spark, good, "silver.movies", ["MovieId"])
+    Q.write_quarantine(bad, "movies", mode="append")
 
 
 def read_user_range(spark, table, user_from, user_to):
-    """Read only rows for a range of userIds. The WHERE runs in Postgres."""
     query = (
         f'(SELECT * FROM bronze.{table} '
         f'WHERE "userId" >= {user_from} AND "userId" < {user_to}) AS chunk'
@@ -174,12 +198,6 @@ def read_user_range(spark, table, user_from, user_to):
     return spark.read.jdbc(url=JDBC_URL, table=query, properties=JDBC_PROPS)
 
 def read_silver_user_range(spark, table, user_from, user_to):
-    """
-    Same as read_user_range but reads from silver, not bronze.
-
-    Note the column is "UserId" here, not "userId" - silver uses
-    PascalCase. Getting this wrong gives a column-not-found error.
-    """
     query = (
         f'(SELECT * FROM silver.{table} '
         f'WHERE "UserId" >= {user_from} AND "UserId" < {user_to}) AS chunk'
@@ -188,12 +206,6 @@ def read_silver_user_range(spark, table, user_from, user_to):
 
 
 def build_ratings(spark, batch_size=20000):
-    """
-    Build silver.ratings in batches of 20,000 users at a time.
-
-    Roughly 3 million rows per batch, which fits in 4 GB.
-    First batch overwrites, the rest append.
-    """
     print("\n--- silver.ratings ---")
 
     batch_num = 0
@@ -219,9 +231,6 @@ def build_ratings(spark, batch_size=20000):
         good, bad = Q.split_good_and_bad(df, bad_condition, "FAILED_VALIDATION")
 
         good = T.epoch_to_timestamp(good, "timestamp", "RatingTstmp")
-
-        # Safe to dedupe within a batch: duplicates on (UserId, MovieId)
-        # are always the same user, so always in the same batch.
         good = T.dedupe_keep_latest(good, ["UserId", "MovieId"], "timestamp")
 
         good = T.add_audit_columns(good)
@@ -230,10 +239,11 @@ def build_ratings(spark, batch_size=20000):
             "CreateDtTm", "UpdateDtTm",
         ])
 
-        mode = "overwrite" if batch_num == 1 else "append"
         good = apply_schema(good, RATINGS_SCHEMA)
-        write_to_postgres(good, "silver.ratings", mode=mode)
-        Q.write_quarantine(bad, "ratings", mode)
+        
+        # UPSERT instead of OVERWRITE
+        upsert_via_staging(spark, good, "silver.ratings", ["UserId", "MovieId"])
+        Q.write_quarantine(bad, "ratings", mode="append")
 
         print(f"  batch {batch_num}: users {user_from:,} to {user_to:,}")
         user_from = user_to
@@ -242,9 +252,6 @@ def build_ratings(spark, batch_size=20000):
 
 
 def build_tags(spark, batch_size=50000):
-    """
-    Same batching. NO dedupe - a user tags one movie many times.
-    """
     print("\n--- silver.tags ---")
 
     batch_num = 0
@@ -275,10 +282,11 @@ def build_tags(spark, batch_size=50000):
             "CreateDtTm", "UpdateDtTm",
         ])
 
-        mode = "overwrite" if batch_num == 1 else "append"
         good = apply_schema(good, TAGS_SCHEMA)
-        write_to_postgres(good, "silver.tags", mode=mode)
-        Q.write_quarantine(bad, "tags", mode)
+        
+        # UPSERT instead of OVERWRITE
+        upsert_via_staging(spark, good, "silver.tags", ["UserId", "MovieId", "TagText"])
+        Q.write_quarantine(bad, "tags", mode="append")
 
         print(f"  batch {batch_num}: users {user_from:,} to {user_to:,}")
         user_from = user_to
@@ -286,7 +294,6 @@ def build_tags(spark, batch_size=50000):
     print(f"  done, {batch_num} batches")
 
 def read_silver(spark, table):
-    """Read a silver table. Small ones only."""
     return spark.read.jdbc(
         url=JDBC_URL,
         table=f"silver.{table}",
@@ -295,25 +302,13 @@ def read_silver(spark, table):
 
 
 def build_movie_metadata(spark):
-    """
-    Join silver.movies to silver.links.
-
-    One row per movie with everything about that movie in it.
-    87,585 rows, so no batching needed.
-    """
     print("\n--- silver.movie_metadata ---")
 
     movies = read_silver(spark, "movies")
     links = read_silver(spark, "links")
 
-    # Drop the audit columns from links before joining, otherwise both
-    # sides have CreateDtTm and UpdateDtTm and Spark cannot tell them apart.
     links = links.select("MovieId", "ImdbId", "TmdbId")
-
-    # LEFT join, not inner. If a movie has no link row we keep the movie
-    # and leave the IDs null. An inner join would silently delete it.
     df = movies.join(links, on="MovieId", how="left")
-
     df = df.drop("Title").withColumnRenamed("CleanTitle" , "Title")
 
     df = T.add_audit_columns(df)
@@ -322,21 +317,12 @@ def build_movie_metadata(spark):
         "ImdbId", "TmdbId", "CreateDtTm", "UpdateDtTm",
     ])
 
-    write_to_postgres(df, "silver.movie_metadata", mode="overwrite")
+    upsert_via_staging(spark, df, "silver.movie_metadata", ["MovieId"])
     print("  done")
 
 def build_user_ratings_master(spark, batch_size=20000):
-    """
-    The big flat table. Every rating with movie details and tags attached.
-
-    Built in batches of 20,000 users, same as build_ratings.
-    Roughly 3 million rows per batch.
-
-    """
     print("\n--- silver.user_ratings_master ---")
 
-    # movie_metadata is only 87k rows, so read it once and reuse it
-    # for every batch instead of re-reading 11 times.
     metadata = read_silver(spark, "movie_metadata").select(
         "MovieId", "Title", "ReleaseYear", "Genres", "ImdbId", "TmdbId"
     )
@@ -349,13 +335,11 @@ def build_user_ratings_master(spark, batch_size=20000):
         user_to = user_from + batch_size
         batch_num += 1
 
-        # --- ratings for this batch of users ---
         ratings = read_silver_user_range(spark, "ratings", user_from, user_to)
         ratings = ratings.select(
             "UserId", "MovieId", "Rating", "RatingTstmp"
         )
 
-        # --- tags for the same users, squashed to one row per pair ---
         tags = read_silver_user_range(spark, "tags", user_from, user_to)
         tags = T.aggregate_to_string(
             tags,
@@ -365,9 +349,6 @@ def build_user_ratings_master(spark, batch_size=20000):
             separator="|",
         )
 
-        # --- join ---
-        # LEFT joins throughout. A rating must survive even if the movie
-        # has no metadata and the user left no tags.
         df = ratings.join(metadata, on="MovieId", how="left")
         df = df.join(tags, on=["UserId", "MovieId"], how="left")
 
@@ -378,8 +359,7 @@ def build_user_ratings_master(spark, batch_size=20000):
             "CreateDtTm", "UpdateDtTm",
         ])
 
-        mode = "overwrite" if batch_num == 1 else "append"
-        write_to_postgres(df, "silver.user_ratings_master", mode=mode)
+        upsert_via_staging(spark, df, "silver.user_ratings_master", ["UserId", "MovieId"])
 
         print(f"  batch {batch_num}: users {user_from:,} to {user_to:,}")
         user_from = user_to
@@ -388,11 +368,7 @@ def build_user_ratings_master(spark, batch_size=20000):
     print(f"  done, {batch_num} batches")
 
 
-
-# Fianl Report
-
 def report():
-    """Read the final counts back from Postgres. Instant, no Spark."""
     print("\n" + "=" * 52)
     print(f"{'TABLE':<22}{'CLEAN':>13}{'QUARANTINED':>15}")
     print("-" * 52)
@@ -412,10 +388,6 @@ def main():
     execute("CREATE SCHEMA IF NOT EXISTS quarantine;")
 
     spark = get_spark("build_silver")
-
-    # More shuffle partitions = smaller chunks during the dedupe.
-    # The default of 200 is too many for a laptop; 64 keeps each
-    # chunk small enough for 4 GB while avoiding excessive overhead.
     spark.conf.set("spark.sql.shuffle.partitions", "16")
 
     try:
@@ -429,7 +401,6 @@ def main():
         spark.stop()
 
     report()
-
 
 if __name__ == "__main__":
     main()
