@@ -3,20 +3,20 @@ Bronze ingestion DAG.
 """
 
 from datetime import datetime, timedelta
-
+from datasets import BRONZE_READY
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from db import count_rows
 from spark_utils import get_spark
 import ingest_bronze as job
 import audit
-from db import count_rows
 
 
 def _run_with_spark(loader_name):
     """
     Start Spark, run one loader function, stop Spark.
     """
-
+    
     spark = get_spark(f"airflow_{loader_name}")
 
     try:
@@ -53,7 +53,6 @@ def _run_with_spark(loader_name):
 
 def create_audit_table():
     """Make sure audit.ingestion_log exists before anything else runs."""
-
     audit.create_log_table()
 
 
@@ -140,6 +139,7 @@ with DAG(
     verify = PythonOperator(
         task_id="verify_row_counts",
         python_callable=verify_counts,
+        outlets=[BRONZE_READY],
     )
 
     # setup runs first, then the three small loads in PARALLEL,
